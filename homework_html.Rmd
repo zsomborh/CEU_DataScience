@@ -1,0 +1,546 @@
+---
+title: "Data Science 1 - homework"
+author: "Zsombor Hegedus"
+date: '2021 february 22 '
+output:
+    prettydoc::html_pretty:
+     theme: architect
+     highlight: github
+---
+
+
+```{r packages, include=FALSE, cache = FALSE}
+
+library(tidyverse)
+library(caret)
+library(skimr)
+library(janitor)
+library(factoextra) 
+library(NbClust) 
+library(knitr)
+library(kableExtra)
+library(data.table)
+library(datasets)
+library(MASS)
+library(ISLR)
+library(viridis)
+library(GGally)
+library(moments)
+
+
+source('https://raw.githubusercontent.com/zsomborh/airbnb_lisbon/main/code/helper.R')
+
+```
+
+```{r load_everything, include=FALSE, cache = TRUE}
+# homework 1
+
+df <- readRDS(url('http://www.jaredlander.com/data/manhattan_Train.rds')) %>%
+    mutate(logTotalValue = log(TotalValue)) %>%
+    drop_na()
+
+# variable grouping - numeric-qualy cols
+
+num_cols <- colnames(df)[sapply(df,is.numeric)] 
+qual_cols <- colnames(df)[!colnames(df) %in% num_cols] 
+remove <- c('ID', 'TotalValue')
+num_cols <- num_cols[!num_cols %in% remove]
+
+# Field descriptions avaialble here: https://github.com/NYCPlanning/db-pluto/blob/master/metadata/Data_Dictionary.md
+# Data is on tax lot level
+# I noticed that the following numerical vars are in fact location based vars and should be factors instead of num
+#   Council should be factor
+#   PolicePrct should be factor
+#   Health Area should be converted to factor based on 
+df <- 
+df %>% mutate(
+    Council = factor(Council),
+    PolicePrct = factor(PolicePrct),
+    HealthArea = factor(HealthArea)
+    
+)
+
+qual_cols <- c(qual_cols, 'Council', 'PolicePrct','HealthArea')
+num_cols <- num_cols[!num_cols %in% c('Council', 'PolicePrct','HealthArea')]
+# Based on high level checks the following grouppings were made 
+
+areas = c('LotArea', 'BldgArea', 'ComArea', 'ResArea', 'OfficeArea', 'RetailArea', 'GarageArea', 'StrgeArea', 'FactryArea', 'OtherArea')
+characteristics = c('NumBldgs','NumFloors', 'UnitsRes', 'UnitsTotal', 'LotFront', 'LotDepth', 'BldgFront', 'BldgDepth')
+ratios = c('BuiltFAR','ResidFAR','CommFAR','FacilFAR')
+outcome = 'logTotalValue'
+
+# I will only keep ZoneDist1 and 2 since there are too many missing values for the rest 
+for (i in c('ZoneDist1' , 'ZoneDist2', 'ZoneDist3' , 'ZoneDist4')){
+    print(paste0('Zone',i,'has this many missing rows: ',df[i] %>% filter(.=='Missing') %>% nrow))
+}
+
+# adding further variable groups
+
+location = c('SchoolDistrict', 'ZoneDist1' , 'ZoneDist2', 'Proximity', 'HistoricDistrict', 'Council', 'PolicePrct', 'HealthArea')
+
+
+characteristics = c(characteristics, 'Class', "LandUse", 'OwnerType', 'Extension', 'IrregularLot',
+                    'LotType', 'BasementType', 'Landmark', 'Built', 'High')
+
+# I will also try out a few interactions drawing conclusoins from the plots and a few handpicked
+
+interactions = c('Built * HistoricDistrict', 'Proximity * High', 'Built * High')
+
+# following variables had extreme values that were suspiciously erroneous - I remove them 
+df<- df %>% filter(!RetailArea == max(RetailArea)) %>% 
+  filter(!BldgDepth == max(BldgDepth)) %>% 
+  filter(!GarageArea == max(GarageArea))
+
+# Get ln of skewed vars
+skews <- sapply(num_cols,function(x) {
+  skewness(df[,x],na.rm = T)
+})
+
+to_ln <- sub("\\..*", "", names(skews[abs(skews) > 3]))
+df <- get_lns(df,num_cols,3)
+ln_vars <- paste0('ln_', to_ln)
+
+# impute 0 for not finite values
+for (i in ln_vars){
+  df[!is.finite(unlist(df[i])),i] <- 0
+}
+
+
+```
+
+## Introduction 
+
+This document is to showcase the solutions of the Data Science 1 homework. Further codes are available on this [github repo](https://github.com/zsomborh/CEU_DataScience) as well.  
+
+*Disclaimer: Please note that in this RMD file I only included the optimised parameters for the penalised models for the sake of easier knitting, but all experiments and parameter optimisation steps are available in my [repo](https://github.com/zsomborh/CEU_DataScience).*
+
+## Homework 1 
+
+#### Data introduction
+
+I am using the Manhattan dataset available on the page of [Jared Lander](http://www.jaredlander.com/data/), which was collected by the New York city planning in pluto-db. The original dataset has more than 31k obsevations where each observation is a tax lot (or property) and 47 variables that I grouped to the following categories: 
+
+ - areas: square feet metrics of different parts of the house 
+ - characteristics: important characterestics of the property like how many floors/buildings it has, is it irregular, does it have a basement etc... 
+ - location: where the property is located 
+ - ratios: these are variables that express some proportions of the property e.g. *BuiltFAR* variables is the total building floor area divided by the area of the tax lot.
+ 
+More info on variables is available [here](https://github.com/NYCPlanning/db-pluto/blob/master/metadata/Data_Dictionary.md). While looking at the distribution of some numeric variables I dropped some extreme values as they were suspicious to be erroneous. In terms of feature engineering, I transformed every skewed numerical variable to log, and also handpicked a few interaction terms (given that I will be experimenting with penalised models, creating as so many features was one of my goals).
+
+#### Modeling
+
+I set aside 70% of my data as a holdout set, and 30% as a train set. For model building I used a 10-fold cross valdation. I started off modeling with OLS models with increasing complexity and then introduced penalised models such as Lasso, Ridge and finally Elastic net. My goal is to predict the log of the value of given property.  
+
+```{r modeling_ols, include=FALSE, cache = TRUE}
+
+# Separete train and holdout set, keep 30% as training 
+
+set.seed(8)
+train_indices <- as.integer(createDataPartition(df$logTotalValue, p = 0.7, list = FALSE))
+df_train <- df[train_indices, ]
+df_holdout <- df[-train_indices, ]
+
+#set train control : 10-fold cv
+
+train_control <- trainControl(
+    method = "cv",
+    number = 10,
+    savePredictions = TRUE,
+    verboseIter = FALSE
+)
+
+# run OLS with increasing complexity 
+
+ols_model1 <- train(
+    formula(paste0("logTotalValue ~", paste0(areas, collapse = " + "))),
+    data = df_train,
+    method = "lm",
+    preProcess = c('center', 'scale'),
+    trControl = train_control
+)
+
+
+ols_model2 <- train(
+  formula(paste0("logTotalValue ~", paste0(c(areas,characteristics), collapse = " + "))),
+  data = df_train,
+  method = "lm",
+  preProcess = c('center', 'scale'),
+  trControl = train_control
+)
+
+
+ols_model3 <- train(
+  formula(paste0("logTotalValue ~", paste0(c(areas,characteristics,ratios), collapse = " + "))),
+  data = df_train,
+  method = "lm",
+  preProcess = c('center', 'scale'),
+  trControl = train_control
+)
+
+
+ols_model4 <- train(
+  formula(paste0("logTotalValue ~", paste0(c(areas,characteristics,ratios, location), collapse = " + "))),
+  data = df_train,
+  method = "lm",
+  preProcess = c('center', 'scale'),
+  trControl = train_control
+)
+
+
+final_predictors = c( areas,characteristics,ratios, location,interactions, ln_vars)
+final_predictors = final_predictors[!final_predictors %in% to_ln]
+
+
+ols_model5 <- train(
+  formula(paste0("logTotalValue ~", paste0(final_predictors, collapse = " + "))),
+  data = df_train,
+  method = "lm",
+  preProcess = c('center', 'scale'),
+  trControl = train_control
+)
+
+ols_model5$results[c('RMSE', 'Rsquared')]
+
+ols_models <- list(
+  'OLS1' = ols_model1,
+  'OLS2' = ols_model2,
+  'OLS3' = ols_model3,
+  'OLS4' = ols_model4,
+  'OLS5' = ols_model5
+)
+
+#ols_cv_results <- resamples(ols_models) %>%  summary()
+
+```
+
+
+```{r table 1, echo = FALSE , results = "asis", warning = FALSE, message = FALSE, cache  = TRUE }
+
+ols_cv_results <- summary(caret::resamples(ols_models))
+
+
+table1<- data.frame('Models' = c('OLS1', 'OLS2', 'OLS3', 'OLS4', 'OLS5'))
+
+table1<- table1 %>%  mutate(
+  RMSE = ols_cv_results$statistics$RMSE[,'Mean'],
+  R_Squared = ols_cv_results$statistics$Rsquared[,'Mean']
+)
+
+knitr::kable(table1,
+             #row.names = c('Logit 1', 'Logit 2', 'Logit 3', 'Logit 4', 'Logit 5', 'Logit Lasso'),
+             #col.names = c( "N.Coef", "RMSE", "AUC"),
+             caption= 'Model comparison for OLS models in terms of RMSE', digits = c(0,3,3)) 
+```
+
+There is a drastic improvement with the inclusion of more and more variables both in terms of RMSE and $R^2$. OLS1 includes only area variables, OLS2 uses property characteristics, OLS3 has ratio variables, OLS4 has location variables and the final OLS5 model has the ln transformed variables and interactions as well. The final model had more than 240 coefficients, mostly due to some factor variables that had a lot of unique values. I will continue modeling with the last set of predictors and use OLS 5 as benchmark when evaluating the penalised models.  
+
+```{r modeling_penalised, include=FALSE, cache = TRUE}
+# 1st one is a Lasso 
+
+
+lasso_tune_grid <- expand.grid(
+  "alpha" = c(1),
+  "lambda" = c(0.005)
+)
+
+set.seed(7)
+lasso_model <- train(
+  formula(paste0("logTotalValue ~", paste0(final_predictors, collapse = " + "))),
+  data = df_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = lasso_tune_grid,
+  trControl = train_control
+)
+
+
+# 2nd is the ridge model
+
+ridge_tune_grid <- expand.grid(
+  "alpha" = c(0),
+  "lambda" = c(0.95)
+)
+
+set.seed(7)
+ridge_model <- train(
+  formula(paste0("logTotalValue ~", paste0(final_predictors, collapse = " + "))),
+  data = df_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = ridge_tune_grid,
+  trControl = train_control
+)
+
+
+# 3rd is elastic net - I will try small lambdas as it was appareantly not
+
+enet_tune_grid <- expand.grid(
+  "alpha" = c(0.1),
+  "lambda" = c(0.005)
+)
+
+set.seed(7)
+enet_model <- train(
+  formula(paste0("logTotalValue ~", paste0(final_predictors, collapse = " + "))),
+  data = df_train,
+  method = "glmnet",
+  preProcess = c("center", "scale"),
+  tuneGrid = enet_tune_grid,
+  trControl = train_control
+)
+```
+
+The performance of penalised models in terms of RMSE compared to the best OLS can be seen in the below table: 
+
+```{r table 2, echo = FALSE , results = "asis", warning = FALSE, message = FALSE, cache  = TRUE }
+
+penalised_models <- list(
+  'Best OLS' = ols_model5,
+  'Lasso' = lasso_model,
+  'Ridge' = ridge_model,
+  'Elastic Net' = enet_model
+)
+
+
+penalised_cv_results <- summary(caret::resamples(penalised_models))  
+
+
+table2<- data.frame('Models' = c('OLS', 'Lasso', 'Ridge', 'Elastic net'))
+
+table2<- table2 %>%  mutate(
+  RMSE = penalised_cv_results$statistics$RMSE[,'Mean']
+  
+)
+
+#table2<- t(as.data.frame(t(penalised_cv_results$statistics$RMSE[,'Mean'])))
+
+#colnames(table2) <- 'RMSE'
+
+knitr::kable(table2,
+            caption= 'Model comparison for penalised models and best OLS in terms of RMSE', digits = c(0,3)) 
+```
+There are a number of important observations to note around the penalised models. First of all, none of them were really able to outperform the best OLS. The $\lambda$ parameters found to be the best were also quite small meaning that penalising the coefficients didn't really help the models predict better - probably the variables used in the prediction were quite important and eliminating or reducing them didn't really make a difference. Elastic net had the best prediction in the end with a small $\alpha$. 
+
+When comparing them, it was visible that Ridge performed the worst, but the Lasso and Elastic Net was performing fairly good. We can see in the below plot that the OLS had the biggest spread for the below loss functions, but by not much. This all boils down to acknowledging that the best model out of the lot was OLS as it doensn't require any parameter optimisation and it has coefficients that are easily interpretable. 
+
+```{r, fig 3, fig.width=6,fig.height=6, fig.align='center', fig.cap='Penalised models - spread of important loss functions', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+bwplot(resamples(penalised_models))
+```
+
+I tried out one way to improve the Elastic net. First of all I checked whether I can use another model that is a bit more simple (meaning one with higher lambda, that performs as good as the best Enet model +/- one standard deviation).`Caret`'s `selectionFunction` parameter with `oneSE` did a great job, finding a little bit simpler model, with lambda being 0.025. The model will be simpler however it also sacrificed a bit on the fit, as we can see RMSE is slightly lower in this case in the below table: 
+
+```{r modeling_onese_pca, include=FALSE, cache = TRUE}
+
+enet_tune_grid <- expand.grid(
+  "alpha" = c(0.1),
+  "lambda" = c(0.005, 0.025)
+)
+
+train_control_onese <- trainControl(
+  method = "cv",
+  number = 10,
+  savePredictions = TRUE,
+  verboseIter = FALSE,
+  selectionFunction = "oneSE"
+)
+
+set.seed(7)
+enet_model_onese <- train(
+  formula(paste0("logTotalValue ~", paste0(final_predictors, collapse = " + "))),
+  data = df_train,
+  method = "glmnet",
+  preProcess = c('center', 'scale'),
+  tuneGrid = enet_tune_grid,
+  trControl = train_control_onese
+)
+
+
+vars_used <- length(ols_model5$coefnames)
+
+tune_grid <- data.frame(ncomp = 230:vars_used)
+set.seed(7)
+pcr_fit <- train(
+  formula(paste0("logTotalValue ~", paste0(final_predictors, collapse = " + "))) ,
+  data = df_train,
+  method = "pcr",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid = tune_grid,
+  preProcess = c("center", "scale")
+)
+```
+
+```{r table 3, echo = FALSE , results = "asis", warning = FALSE, message = FALSE, cache  = TRUE }
+
+
+onese_cv_results <- summary(caret::resamples(list(enet_model,enet_model_onese)))  
+
+
+table3<- data.frame('Models' = c('Enet', 'Enet - onese'))
+
+table3<- table3 %>%  mutate(
+  RMSE = onese_cv_results$statistics$RMSE[,'Mean']
+  
+)
+
+#table2<- t(as.data.frame(t(penalised_cv_results$statistics$RMSE[,'Mean'])))
+
+#colnames(table2) <- 'RMSE'
+
+knitr::kable(table3,
+            caption= 'Model comparison for elastic nets that use oneSE parameter or not', digits = c(0,3)) 
+```
+
+Since the elastic net was still beat by the OLS, I further experimented with OLS and principal component analysis (PCA). The OLS had more than 240 coefficients, so finding the optimal number of principal components was a hardware heavy task. Finally it looked like 235 principal component produces the optimal minimum RMSE as it can be seen in the below plot (in my github repo I checked 60 to the number of coefficients, and everything above 235 deteriorated the RMSE). Overall I coudln't achieve a considerably higher performance with PCA with and without PCA I got and RMSE that is around 0.522. 
+
+```{r, fig 4, fig.width=6,fig.height=6, fig.align='center', fig.cap='Finding the optimal number of PC', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+ggplot(pcr_fit) +xlim(230,236) + ylim(0.52,0.523) +theme_minimal()
+```
+
+Finally I went back to Enet and tried whether PCA can help to improve he RMSE (with 235 principal components). My intuition was that PCA would not really be able to improve RMSE dramatically (given that dimensionality reduction might not be very effective given lambdas weren't effective either), but maybe some improvement could be achieved. The below table shows what is the result of using PCA on the elastic net.  
+
+```{r modeling_enet_pca, include=FALSE, cache = TRUE}
+
+train_control_enet_pca <- trainControl(
+  method = "cv",
+  number = 10,
+  savePredictions = TRUE,
+  verboseIter = FALSE,
+  preProcOptions = list(pcaComp =pcr_fit$bestTune[[1]])
+)
+
+enet_pca_tune_grid <- expand.grid(
+  "alpha" = c(0.05),
+  "lambda" = c(0.005)
+)
+
+enet_model$bestTune
+
+set.seed(7)
+enet_model_pca <- train(
+  formula(paste0("logTotalValue ~", paste0(final_predictors, collapse = " + "))),
+  data = df_train,
+  method = "glmnet",
+  preProcess = c("center", "scale", 'pca', 'nzv'),
+  tuneGrid = enet_pca_tune_grid,
+  trControl = train_control_enet_pca
+)
+```
+
+```{r table 4, echo = FALSE , results = "asis", warning = FALSE, message = FALSE, cache  = TRUE }
+
+
+allenet_cv_results <- summary(caret::resamples(list(enet_model,enet_model_onese, enet_model_pca)))  
+
+
+table4<- data.frame('Models' = c('Enet', 'Enet - onese', 'Enet - PCA'))
+
+table4<- table4 %>%  mutate(
+  RMSE = allenet_cv_results$statistics$RMSE[,'Mean']
+  
+)
+
+#table2<- t(as.data.frame(t(penalised_cv_results$statistics$RMSE[,'Mean'])))
+
+#colnames(table2) <- 'RMSE'
+
+knitr::kable(table4,
+            caption= 'Model comparison for all elastic nets trained for this homework', digits = c(0,3)) 
+```
+
+Looks like PCA didn't help the model, but even made RMSE worse. Since I couldn't improve the RMSE with PCA either, I gave up on elastic net - I sticked to the Best OLS model and predicted the RMSE on the holdout. 
+
+``` {r, include = FALSE}
+RMSE(predict(enet_model_pca, newdata = df_holdout), df_holdout[["logTotalValue"]])
+```
+
+The RMSE on the holdout is a stunning 0.5266, which is a great performance given that the model was trained on 30% only.
+
+## Homework 2
+
+```{r load_hw2, include=FALSE, cache = TRUE}
+df2<- USArrests
+df2 <- scale(df2) %>% as.data.frame()
+
+```
+
+I will use unsupervised algorithms as part of solving the second homework. I used the USArrest dataset which is a relatively small dataset with 4 variables and 50 observations, where each observation is a US state. I will first preprocess the data (demeaned it so they are spread accross the origo and scaled by dividing each observation with 1 standard deviation) - this is crucial for the PCA, but also useful for K-means as we will measure distances on the same scale.
+
+When deciding on the optimal number of clusters I first plotted within cluster variance would look like given different number of clusters. Here we look for the elobow, aka. the point where we achieve a substantial improvement in reducing the within cluster variance, but still since this process converges to 0 as the number of clusters reach the number of observations - but that is overfitting our data by a large margin. The below figures shows the elbows are at cluster 2 and 3. 
+
+```{r, fig 5, fig.width=6,fig.height=6, fig.align='center', fig.cap='Within cluster variance for different clusters', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+fviz_nbclust(df2, kmeans, method = "wss")
+
+```
+
+I also used `NbClust` method that compares different approaches to finding the optimal amount of clusters. Based on majority voting, 11 proposed 2 to be the optimal number of clusters so I will continue the analysis choosing 2 clusters.
+
+```{r, results="hide"}
+nb <- NbClust(df2, method = "kmeans", min.nc = 2, max.nc = 10, index = "all")
+nb
+```
+
+Let's see how the algo clustered the observations in a scatter plot with Urban Population of the $x$ axis and Murder on the $y$ axis. 
+
+```{r, fig 6, fig.width=6,fig.height=4, fig.align='center', fig.cap='Identified clusters - scatter plot of UrbanPopulation and Murder', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+
+km <- kmeans(df2, centers = 2, nstart = 50)
+
+df2<- df2  %>% mutate(cluster = factor(km$cluster))
+
+ggplot(df2, aes(x = UrbanPop, y = Murder, color = cluster)) +
+  geom_point() + theme_minimal() + labs(x = 'Urban population')
+
+```
+
+Data is scaled so we can only draw conclusions based on the point's location relative to the origin. Looks like the method mostly clustered observations together that are either below or above the average. If our task would be a simple binary classification in which states should be grouped together whether they are *less-dangerous* or *more-dangerous* than probably k-means with 2 clusters does a good job, however if we look for more sophistication, then probably more clusters have to be chosen. 
+
+Lastly I will run PCA and see how observations spread around the first two principal components. 
+
+```{r prep_pca_hw2, include = FALSE, cache = TRUE}
+pca_result <- prcomp(df2[,c('Murder', 'Assault', 'UrbanPop', 'Rape')]) # I didn't use scale = T arg as df is already scaled
+
+first_two_pc <- as.data.frame(pca_result$x[,c('PC1', 'PC2')]) %>% mutate(cluster = factor(km$cluster))
+```
+
+```{r, fig 7, fig.width=6,fig.height=4, fig.align='center', fig.cap='Scatter plot of clusters by first two principal components', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+
+ggplot(first_two_pc) + geom_point(aes(x= PC1, y = PC2, colour = cluster)) + theme_minimal()
+```
+
+## Homework 3 
+
+```{r prep_pca_hw3, include = FALSE, cache = TRUE}
+data <- fread("C:/Workspace/R_directory/CEU/machine-learning-course/data/gene_data_from_ISLR_ch_10/gene_data.csv")
+data[, is_diseased := factor(is_diseased)]
+dim(data)
+tail(names(data))
+
+data_features <- copy(data)
+data_features[, is_diseased := NULL]
+
+pca_result <- prcomp(data_features, scale. = TRUE)
+```
+In this task I will do PCA with high-dimensional data where the dataset has 40 observations but 1001 variables. After running PCA on scaled data I will I wil visualise data with `fviz_pca_ind` function which takes the first two PCs and puts the observations as points in a figure. 
+
+```{r, fig 8, fig.width=6,fig.height=4, fig.align='center', fig.cap='Scatter plot of clusters by first two principal components', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+fviz_pca_ind(pca_result)
+```
+The figure has a very interesting finding, mainly on the axes of the first principal component, observations seem to be divided into two big groups or clusters. Even in the face of so many dimensions we might just be able to find some  patterns with PCA.
+
+The scree plot helps us see how much information each PC contains, and the below figure will show us that PC1 is by far the most important compared to others.
+
+```{r, fig 9, fig.width=6,fig.height=4, fig.align='center', fig.cap='Scree plot', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+screeplot(pca_result, npcs =50 )
+
+```
+If our goal would be to separate healthy and unhealthy genes given these so many dimensions, one approach I can think of is looking at how important a feature is to the most important PC, that is PC1. To do that I will look at the absolute value of loadings, that basically tells us the proportion of how much a feature contribute to the eigenvector used for the PC. I picked the two features with the biggest loadings (measure_502 and measure_589) and plotted them in the below figure: 
+
+```{r, fig 10, fig.width=6,fig.height=4, fig.align='center', fig.cap='Scatter plot of the two most important features in ', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+top10_contrib <- pca_result$rotation[,'PC1'] %>% abs() %>% sort(decreasing = T) %>% head(10)
+
+ggplot(data_features)+geom_point(aes(x = measure_502, y = measure_589), color = 'navyblue') + theme_minimal()
+
+```
+
+Looks like these two features are highly correlated. Experimenting a little bit around the data, I found very similar patterns - variables with high importance to PC1 are more correlated to each other, which is also true for variables that are the least important for PC1. However plotting two features where one is important and another is not, there is absolutely no correlation whatsoever between the metrics.
+

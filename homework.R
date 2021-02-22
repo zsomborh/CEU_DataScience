@@ -19,10 +19,7 @@ df <- readRDS(url('http://www.jaredlander.com/data/manhattan_Train.rds')) %>%
     drop_na()
 
 # goal will be to predict the logTotalValue - We look at property values in Manhatten
-pf <- df %>% as.data.frame()
 
-
-typeof(pf)
 colSums(is.na(df))
 # there are no NAs
 
@@ -154,7 +151,6 @@ to_ln <- sub("\\..*", "", names(skews[abs(skews) > 3]))
 df <- get_lns(df,num_cols,3)
 ln_vars <- paste0('ln_', to_ln)
 
-df %>% data.frame %>% typeof
 
 for (i in ln_vars){
   df[!is.finite(unlist(df[i])),i] <- 0
@@ -239,8 +235,14 @@ ols_models <- list(
 )
 
 ols_cv_results <- resamples(ols_models) %>%  summary()
-ols_cv_results$statistics$RMSE[,'Mean']
-ols_cv_results$statistics$Rsquared[,'Mean']
+ols_cv_results$values
+
+table1<- data.frame('Models' = c('OLS1', 'OLS2', 'OLS3', 'OLS4', 'OLS5'))
+
+table1<- table1 %>%  mutate(
+  RMSE = ols_cv_results$statistics$RMSE[,'Mean'],
+  R_Squared = ols_cv_results$statistics$Rsquared[,'Mean']
+)
 
 #checking on holdout
 result_holdout <- map(ols_models, ~{
@@ -256,7 +258,7 @@ result_holdout
 
 lasso_tune_grid <- expand.grid(
   "alpha" = c(1),
-  "lambda" = seq(0.005, 0.2, by = 0.01)
+  "lambda" = seq(0.005, 0.1, by = 0.01)
 )
 
 set.seed(7)
@@ -274,7 +276,7 @@ lasso_model <- train(
 
 ridge_tune_grid <- expand.grid(
   "alpha" = c(0),
-  "lambda" = seq(0.005, 0.2, by = 0.01)
+  "lambda" = seq(0.005, 0.1, by = 0.01)
 )
 
 set.seed(7)
@@ -287,12 +289,13 @@ ridge_model <- train(
   trControl = train_control
 )
 
+ggplot(ridge_model)
 
 # 3rd is elastic net - I will try small lambdas as it was appareantly not 
 
 enet_tune_grid <- expand.grid(
   "alpha" = seq(0, 1, by = 0.1),
-  "lambda" = seq(0.005, 0.2, by = 0.01)
+  "lambda" = seq(0.005, 0.1, by = 0.01)
 )
 
 set.seed(7)
@@ -305,7 +308,7 @@ enet_model <- train(
   trControl = train_control
 )
 
-ggplot(enet_model)
+ggplot(enet_model) + theme_minimal()
 
 saveRDS(enet_model, 'enet.rds')
 
@@ -324,11 +327,14 @@ penalised_models <- list(
 )
 
 penalised_cv_results <- resamples(penalised_models) %>%  summary()
-penalised_cv_results$statistics$RMSE[,'Mean']
+t(as.data.frame(t(penalised_cv_results$statistics$RMSE[,'Mean'])))
+
+
+enet_model$bestTune
 
 
 #Model evaluation 
-penalised_result_holdout
+
 bwplot(resamples(penalised_models))
 
 model_differences <- diff(resamples(penalised_models))
@@ -359,12 +365,14 @@ enet_model_onese <- train(
   trControl = train_control_onese
 )
 
+enet_model
+
 resamples(list(enet_model, enet_model_onese)) %>% summary()
 
 enet_model$bestTune
 enet_model_onese$bestTune
 
-
+enet_model_onese
 # Using PCA on linear models ----------------------------------------------
 
 # We first try to see the optimal number of components with pcr 
@@ -383,7 +391,7 @@ pcr_fit <- train(
   preProcess = c("center", "scale")
 )
 
-ggplot(pcr_fit) +xlim(60,236) + ylim(0.52,0.65) 
+ggplot(pcr_fit) +xlim(200,236) + ylim(0.52,0.535) +theme_minimal()
 
 mean(ols_model5$resample$RMSE)
 mean(pcr_fit$resample$RMSE)
@@ -419,9 +427,10 @@ enet_model_pca <- train(
   trControl = train_control_enet_pca
 )
 
-enet_model_pca
+enet_model_pca$bestTune
 
 
 # Evaluate best model on holdout ------------------------------------------
 
-RMSE(predict(enet_model_pca, newdata = df_holdout), df_holdout[["logTotalValue"]])
+RMSE(predict(ols_model5, newdata = df_holdout), df_holdout[["logTotalValue"]])
+
