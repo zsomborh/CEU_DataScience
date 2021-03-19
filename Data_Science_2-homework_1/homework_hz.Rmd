@@ -1,0 +1,486 @@
+---
+title: "DataScience2 - homework1"
+author: "Zsombor Hegedus"
+date: '2021 március 19 '
+output: html_document
+---
+
+```{r packages, include=FALSE, cache = FALSE}
+library(tidyverse)
+library(h2o)
+library(caret)
+library(xgboost)
+library(rattle)
+library(pROC)
+library(cowplot)
+theme_set(theme_bw())
+
+source('https://raw.githubusercontent.com/zsomborh/CEU_DataScience/main/Data_Science_2-homework_1/helper.R')
+
+h2o.init()
+
+data <- as_tibble(ISLR::OJ)
+
+data <- data %>% mutate(
+    WeekofPurchase = factor(WeekofPurchase),
+    StoreID = factor(StoreID),
+    SpecialCH = factor(SpecialCH),
+    SpecialMM = factor(SpecialMM),
+    STORE = factor(STORE)
+)
+
+h2o_data <- as.h2o(data)
+
+splitted_data <- h2o.splitFrame(h2o_data, ratios = c(0.75), seed = 20210316)
+train_data <- splitted_data[[1]]
+test_data <- splitted_data[[2]]
+
+
+response = "Purchase"
+predictors = setdiff(
+    colnames(data), 
+    c(response))
+
+my_seed <- 20210316
+
+```
+
+## Introduction 
+
+This document is to showcase the solutions of the Data Science 2 homework. Further codes are available in this [github repo](https://github.com/zsomborh/CEU_DataScience/tree/main/Data_Science_2-homework_1) as well.  
+
+*Disclaimer: Please note that in this RMD file I didn't include hyperparameter tuning for the sake of easier knitting, and not to run to errors with H20, but all my codes for each hw, with hyperparameter optimisation where it was needed are available in my github [repo](https://github.com/zsomborh/CEU_DataScience/tree/main/Data_Science_2-homework_1).*
+
+## Tree ensemble models
+
+I used the OJ dataset where my goal is a binary classification - in this case it is to predict that between two options which juice is going to be bought. After loading up the data and doing some minor transformations I will create a 75% training and 25% test set. 
+
+I will also train a benchmark decision tree for which I used only maxdepth of 4 as hyperparameter, otherwise the tree would heavily overfit the data. 
+
+```{r tree, include = F}
+
+dectree = 
+    h2o.gbm(x = predictors, y = response, 
+            training_frame = train_data, 
+            model_id ='dectree_hw1', 
+            ntrees = 1, min_rows = 1, 
+            sample_rate = 1, col_sample_rate = 1,
+            max_depth = 4,
+            nfolds=5,
+            stopping_rounds = 3, stopping_tolerance = 0.01, 
+            stopping_metric = "AUC", 
+            seed = 20210316)
+
+```
+
+```{r plottree, fig.width=10,fig.height=6, fig.align='center', fig.cap='Benchmark decision tree', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+titanicH2oTree = h2o.getModelTree(model = dectree, tree_number = 1)
+
+titanicDataTree = createDataTree(titanicH2oTree)
+
+GetEdgeLabel <- function(node) {return (node$edgeLabel)}
+GetNodeShape <- function(node) {switch(node$type, 
+                                       split = "diamond", leaf = "oval")}
+GetFontName <- function(node) {switch(node$type, 
+                                      split = 'Palatino-bold', 
+                                      leaf = 'Palatino')}
+SetEdgeStyle(titanicDataTree, fontname = 'Palatino-italic', 
+             label = GetEdgeLabel, labelfloat = TRUE,
+             fontsize = "26", fontcolor='royalblue4')
+SetNodeStyle(titanicDataTree, fontname = GetFontName, shape = GetNodeShape, 
+             fontsize = "26", fontcolor='royalblue4',
+             height="0.75", width="1")
+
+SetGraphStyle(titanicDataTree, rankdir = "LR", dpi=70.)
+
+plot(titanicDataTree, output = "graph")
+
+
+```
+
+The three shows LoyalCH and WeekofPurchase as the most commonly used variables that are used for the splitting. Around the last levels there are some other variables being picked up, but the dominance of week of purchase and LoyalCH is quite apparent. 
+
+Next, I investigated three ensemble models: random forest, gradient boosting machine and XGBoost. I tried out various tuning parameters and chosen the best out of the lot. For each model I used 5-fold cross validation and I looked at three metrics to decide on which one is the best: accuracy (as in how many times did the model classify correctly), RMSE and AUC. I trained all models with the help of `H2o` except for XGBoost, as that is not implemented for Windows. To run XGB I will use `caret`.  The performances are summarised in the below table:
+
+```{r ensemble, include = F}
+
+rf_model <- h2o.randomForest(
+    predictors, response,
+    training_frame = train_data,
+    model_id = "rf_hw1",
+    ntrees = 500,
+    mtries = 3,
+    max_depth = 3,
+    seed = my_seed,
+    nfolds = 5,
+    keep_cross_validation_predictions = TRUE
+)
+
+best_gbm <- h2o.gbm(
+    predictors, response,
+    training_frame = train_data,
+    model_id = "gbm_hw1",
+    ntrees = 300,
+    max_depth = 2,
+    learn_rate = 0.01,
+    sample_rate = 0.8,
+    seed = my_seed,
+    nfolds = 5,
+    keep_cross_validation_predictions = TRUE
+)
+```
+```{r, include = F}
+xgb_model <- readRDS('C:/Users/T450s/Desktop/programming/git/CEU_DataScience/xgb_model.rds')
+
+auc <- list()
+for (fold in c("Fold1", "Fold2", "Fold3", "Fold4", "Fold5")) {
+    cv_fold <-
+        xgb_model$pred %>%
+        filter(Resample == fold)
+    
+    roc_obj <- roc(cv_fold$obs, cv_fold$CH)
+    auc[[fold]] <- as.numeric(roc_obj$auc)
+}
+auc_df = data.frame("Resample" = names(auc),"AUC" = unlist(auc))
+
+xgb_acc = mean(xgb_model$resample[,c("Resample", "Accuracy")]$Accuracy)
+xgb_rmse = mean(xgb_model$resample[,c("Resample", "RMSE")]$RMSE)
+xgb_auc = mean(auc_df$AUC)
+```
+
+
+```{r , echo = FALSE , results = "asis", warning = FALSE, message = FALSE, cache  = TRUE }
+summary <- list()
+
+models <- c('dectree'  = dectree, 'rf' = rf_model, 'gbm' = best_gbm)
+
+summary_df <- sapply(models,get_scores) %>% as.data.frame()
+
+xgb_list <- list('xgboost' = c(xgb_rmse, xgb_auc,xgb_acc))
+summary_df <- cbind(summary_df,xgb_list)
+
+knitr::kable(summary_df, digits = c(4,4,4,4))
+```
+
+The results are very interesting, GBM is the most accurate, however XGBoost has the lowest RMSE and the highest AUC. Since this is a classification task and since I didn't have any specific loss function in mind - as in how to interpret losses of misclassification - I chose the GBM model as that seemed to be the most accurate in classification Let's examine the roc curve of the GBM in the next graph that is run on the test set: 
+
+```{r , fig.width=6,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+
+plot(h2o.performance(best_gbm, newdata = test_data, xval = T),valid=T,type='roc')
+```
+
+The ROC curve shows a nice predictive performance - the blue line is very close to the upper left corner of the graph, which also means that it's area under the curve is fairly good (more than 0.88) as we can see in the below code snippet. 
+
+``` {r}
+h2o.auc(h2o.performance(best_gbm, newdata = test_data, xval = T))
+```
+
+It might be worthwhile to think about an effective threshold for classification which is always dependent on the use case so in order to fine tune this model, it would be good practice to talk to the stakeholders and understand the context better.
+
+Lastly I will look at the variable importance plots for each three models. The first one is the random forest model below: 
+```{r , fig.width=6,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+h2o.varimp_plot(rf_model)
+```
+
+Mtry parameter was set at 3, which is quite small given the amount of coefficients in this exercise (lots of dummies were used from factor variables). And even though this limitationn, the RF used LoyalCH most of the times for splitting, which is clearly the most important variable for the  model. Week of purchase dummies also contributed a lot, but were almost 3 times less important than LoyalCH. Let's look at the GBM model next:
+
+```{r , fig.width=6,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+h2o.varimp_plot(best_gbm)
+```
+
+Here the impact of the two most important variables is even more visible, there is almost no importance mapped to the variables other than WeekofPurchase and LoyalCH. Loyal CH is again the most important factor, so we can say that loyalty for the brand is what really matters for the customers. I will also look at the variable importance plot of the XGBoost model (The format of this plot is much different to the rest given this is a ggplot object as for XGBoost I needed to use `caret` and couldn't recreate the `H2o` plots unfortunately):
+
+```{r , fig.width=6,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+varimp_df <- varImp(xgb_model)
+varimp_df <- varimp_df$importance %>% as.data.frame() %>% mutate(
+    vars = rownames(varimp_df$importance),
+    cat = ifelse(startsWith(vars,'WeekofPurchase'),'WeekofPurchase',
+                 ifelse(startsWith(vars,'StoreID'),'StoreID',
+                        ifelse(startsWith(vars,'STORE'),'STORE',vars)
+                 ))) 
+
+
+varimp_df <- varimp_df %>% group_by(cat) %>% summarise(imp = sum(Overall)) %>% arrange(desc(imp))
+ggplot(varimp_df, aes(x = reorder(cat,imp), y = imp))+geom_bar(stat = 'identity', fill = 'navyblue') + coord_flip() + theme_bw()
+
+```
+
+The XGBoost is telling a very similar story as the others when it comes to LoyalCH, however WeekofPurchase variable was not as important. Looks like the XGB was really concentrated on LoyalCH only, the second most important variable (PriceDiff) had an importance that is 10 times lower than LoyalCH. Now all three models are convinced that loyalty is the most important factor, so the brands should really take care of the image they convey to the customers and try to keep their loyal customers. 
+
+## 2. Variable importance profiles
+
+I will use the Hitters dataset and draw some conclusions on how tree based models work in case the mtry parameter is tuned for RF, and the sample rate is tweaked for GBM
+``` {r, include = F}
+rm(list = ls())
+
+
+## Load data
+
+data <- as_tibble(ISLR::Hitters) %>%
+    drop_na(Salary) %>%
+    mutate(log_salary = log(Salary), Salary = NULL)
+
+
+h2o_data <- as.h2o(data)
+
+## Tune Rfs
+response = "log_salary"
+predictors = setdiff(
+    colnames(data), 
+    c(response))
+
+
+rf_params <- list(ntrees = c(500), mtries = c(2, 10))
+
+## Run Rfs
+
+rf_grid <- h2o.grid(
+    "randomForest", x = predictors, y = response,
+    training_frame = h2o_data,
+    seed = 20210317,
+    hyper_params = rf_params
+)
+
+rf_model_m_2 <- h2o.getModel(rf_grid@model_ids[[1]])
+rf_model_m_10 <- h2o.getModel(rf_grid@model_ids[[2]])
+
+
+
+
+## Do the same with GBM
+
+gbm_params <- list(
+    learn_rate = c(0.1), 
+    ntrees = c(500),
+    max_depth = c(5),
+    sample_rate = c(0.1, 1)
+)
+
+gbm_grid <- h2o.grid(
+    "gbm", x = predictors, y = response,
+    training_frame = h2o_data,
+    seed = 20210317,
+    hyper_params = gbm_params
+)
+
+gbm_model_m_01 <- h2o.getModel(gbm_grid@model_ids[[1]])
+gbm_model_m_1 <- h2o.getModel(gbm_grid@model_ids[[2]])
+
+```
+
+#### RF models
+
+In the first case I will limit the model to choose from only two variables for each split - this way we will have heavily decorrelated trees, however we will lose out on the effect of the strongest variable as it might not be selected many times during the training process. Below is the first variable importance plot:
+
+```{r , fig.width=6,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+h2o.varimp_plot(rf_model_m_2)
+
+
+```
+
+In the second case I will allow the model to choose from 10 variables which is quite loosened up when compared to the previous plot. This way variables that are not so imporant like CHmRun or RBI will not be selected as many times as they were otherwise, as it can be seen below: 
+
+```{r , fig.width=6,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+
+h2o.varimp_plot(rf_model_m_10)
+
+```
+
+So overall we can say that relative importance of variables compared to each other increases for the most important variables in case mtry is higher. This is quite intuitive, if the tree has more room to choose from variables, since it is greedy, it will always choose the variable that allows for a better split, and wouldn't go for less important ones. 
+
+#### GBM models
+
+We can do the same with GBM models - first I will take one with sampling of 0.1 first which will limit the sampling rate of the trees to 10% - meaning that only 10% of the rows will be used to train the trees. Next I will use 100% of my data - these are two extreme cases, one will probably underfit the other will probabaly overfit the results.  
+
+```{r , fig.width=6,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+
+h2o.varimp_plot(gbm_model_m_01)
+
+```
+
+The first case above is for the 10% subsampling. We can see that compared to the random forest cases the most important vairable was much more dominant. This can be explained quite intuitively, since we don't tell the tree to pick between variables, it will use the most important variable as much as it wants to. This will change slightly for the next tree, the 100% subsampling case.
+
+```{r , fig.width=6,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+
+h2o.varimp_plot(gbm_model_m_1)
+
+```
+
+It is visible that this model uses the other featuers relatively more than in the 10% case. Probably the bigger the dataset, the more versatile data we have, where the tree used those other variables more times to do the splitting. Maybe we have datapoints that behave much more differently to others  which might not have been highly representative in the 10% sampling case, and for which we need those other variables more to do prediction. 
+
+## 3. Stacking 
+
+In this third exercise I will be using a dataset from Kaggle to predict whether people will show up to their doctor's appointment or not. After a small cleaning I did some feature engineering (got age squared and log transformed hours since scheduled) and created a 4-45-50 train/validation/test set.
+
+``` {r, include = F}
+
+rm(list = ls())
+
+
+
+source('C:/Users/T450s/Desktop/programming/git/CEU_DataScience/Data_Science_2-homework_1/helper.R')
+## Get the data 
+
+data <- read_csv("C:/Users/T450s/Desktop/programming/git/CEU_DataScience/Data_Science_2-homework_1/KaggleV2-May-2016.csv")
+
+my_seed <- 20210318
+# some data cleaning
+data <- select(data, -one_of(c("PatientId", "AppointmentID", "Neighbourhood"))) %>%
+    janitor::clean_names()
+
+# for binary prediction, the target variable must be a factor + generate new variables
+data <- mutate(
+    data,
+    no_show = factor(no_show, levels = c("Yes", "No")),
+    handcap = ifelse(handcap > 0, 1, 0),
+    across(c(gender, scholarship, hipertension, alcoholism, handcap), factor),
+    hours_since_scheduled = as.numeric(appointment_day - scheduled_day),
+    diabetes = factor(diabetes),
+    age_sq = age **2,
+    hours_since_scheduled_ln = log(hours_since_scheduled+1)
+)
+
+# clean up a little bit
+data <- filter(data, between(age, 0, 95), hours_since_scheduled >= 0) %>%
+    select(-one_of(c("scheduled_day", "appointment_day", "sms_received")))
+
+
+data_split <- h2o.splitFrame(as.h2o(data), ratios = c(0.05,0.45), seed = my_seed)
+data_train <- data_split[[1]]
+data_valid<- data_split[[2]]
+data_test <- data_split[[3]]
+
+y <- "no_show"
+X <- setdiff(names(data_train), c(y, 'hours_since_scheduled'))
+```
+
+First of all I created a logit model as a benchmark to evaluate other models against it. The AUC of this model on the validation set was 0.585, which doesn't seem like a hard one to beat (it should be noted that I trained models only on 5%, so low AUC is somewhat excused).
+
+After that I built three base models to see if logit can be beaten by others such as random forest, gradient boosting machines and lastly I also tried out a deeplearning model. First of all, I looked at the validation performance of the 4 models (this is expressed in AUC). 
+
+```{r, include = F}
+#train models
+simple_lm <- h2o.glm(
+    X, y,
+    training_frame = data_train,
+    model_id = "logit_hw3",
+    lambda = 0,
+    nfolds = 5,
+    seed = my_seed,
+    keep_cross_validation_predictions = TRUE
+)
+
+rf_model <- h2o.randomForest(
+    X, y,
+    training_frame = data_train,
+    model_id = "rf_hw3",
+    ntrees = 500,
+    mtries = 3,
+    max_depth = 3,
+    seed = my_seed,
+    nfolds = 5,
+    keep_cross_validation_predictions = TRUE
+)
+
+
+
+gbm_model <- h2o.gbm(
+    X, y,
+    training_frame = data_train,
+    model_id = "gbm_hw3",
+    ntrees = 700,
+    max_depth = 2,
+    learn_rate = 0.01,
+    seed = my_seed,
+    nfolds = 5,
+    keep_cross_validation_predictions = TRUE
+)
+
+deeplearning_model <- h2o.deeplearning(
+    X, y,
+    training_frame = data_train,
+    model_id = "deeplearning_hw3",
+    hidden = c(10,10,10,10,10),
+    seed = my_seed,
+    epochs = 200,
+    epsilon  = 1e-10,
+    max_w2 = 100,
+    nfolds = 5,
+    input_dropout_ratio = 0.1,
+    keep_cross_validation_predictions = TRUE,
+    stopping_metric = 'AUC'
+)
+
+
+my_models <- list(simple_lm, rf_model, gbm_model, deeplearning_model)
+
+validation_performances <- list(
+    "simple_lm" = h2o.auc(h2o.performance(simple_lm, newdata = data_valid)),
+    "rf" = h2o.auc(h2o.performance(rf_model, newdata = data_valid)),
+    "gbm" = h2o.auc(h2o.performance(gbm_model, newdata = data_valid)),
+    "deeplearning" = h2o.auc(h2o.performance(deeplearning_model, newdata = data_valid))
+)
+validation_performances
+
+
+
+# stacking base learners 
+
+ensemble_model <- h2o.stackedEnsemble(
+    X, y,
+    training_frame = data_train,
+    base_models = my_models,
+    keep_levelone_frame = TRUE
+)
+
+validation_performances2 <- list(
+    "simple_lm" = h2o.auc(h2o.performance(simple_lm, newdata = data_valid)),
+    "rf" = h2o.auc(h2o.performance(rf_model, newdata = data_valid)),
+    "gbm" = h2o.auc(h2o.performance(gbm_model, newdata = data_valid)),
+    "deeplearning" = h2o.auc(h2o.performance(deeplearning_model, newdata = data_valid)),
+    'ensemble_model' =  h2o.auc(h2o.performance(ensemble_model, newdata = data_valid))
+)
+
+
+test_performances <- list(
+    "simple_lm" = h2o.auc(h2o.performance(simple_lm, newdata = data_test)),
+    "rf" = h2o.auc(h2o.performance(rf_model, newdata = data_test)),
+    "gbm" = h2o.auc(h2o.performance(gbm_model, newdata = data_test)),
+    "deeplearning" = h2o.auc(h2o.performance(deeplearning_model, newdata = data_test)),
+    'ensemble_model' =  h2o.auc(h2o.performance(ensemble_model, newdata = data_test))
+)
+```
+
+```{r , echo = FALSE , results = "asis", warning = FALSE, message = FALSE, cache  = TRUE }
+
+knitr::kable(validation_performances %>% as.data.frame(), digits = c(4,4,4,4))
+
+```
+
+We can see that it was not an easy task to beat the benchmark overall, but with a small amount of tuning all three base models did it. Out of the lot Random forest did the best job, with 500 trees, mtry set at 3 and max depth set at 3 as well. I tried several tweaks to improve the GBM and the deeplearning model, but in the end I couldn't make them good enough to beat the random forest. 
+
+We can examine the correlation heatmap of the model predictions on the validation set as well. We can see that they have a relatively strong correlation - as expected - and probably the most different outcomes were coming from gbm vs deeplearning and rf vs deeplearning. 
+
+```{r , fig.width=6,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+h2o.model_correlation_heatmap(my_models, data_valid)
+```
+
+For the next step I tried stacking them to see if any improvement can be achieved by combining all these base learners into a meta-learner. There is a slight improvement coming from stacking when compared to glm, deeplearning and gbm, but it still couldn't beat the random forest (there was a slight difference between the two only) as we can see the table below that summerises AUCs on the validation set.
+
+```{r , echo = FALSE , results = "asis", warning = FALSE, message = FALSE, cache  = TRUE }
+
+knitr::kable(validation_performances2 %>% as.data.frame(), digits = c(4,4,4,4,4))
+
+```
+
+As a last step I evaluated all of the models on the test set as well. The rf model was the best one from the lot, so I will concentrate only on this one.
+
+```{r , echo = FALSE , results = "asis", warning = FALSE, message = FALSE, cache  = TRUE }
+
+knitr::kable(test_performances %>% as.data.frame(), digits= c(4,4,4,4,4))
+
+```
+
+Performance of the rf model on the test set was not very different compared to it's performance on the validation set (it was slightly better). If we give a sneak peak to the others, it is visible that all of them are quite similar when comparing validation and test performances. 
+
+So all in all it can be said that the random forest model is robust as it was performing very similarly on both the validation and the test set, however it probably could improve a lot if it was trained on more than 5% on the population. 
