@@ -1,0 +1,43 @@
+"0","rf_model <- h2o.getModel(h2o.getGrid(rf_grid@grid_id, ""auc"")@model_ids[[6]])
+best_gbm <- h2o.getModel(
+    h2o.getGrid(gbm_grid@grid_id, ""auc"")@model_ids[[24]]
+)
+auc <- list()
+for (fold in c(""Fold1"", ""Fold2"", ""Fold3"", ""Fold4"", ""Fold5"")) {
+    cv_fold <-
+        xgb_model$pred %>%
+        filter(Resample == fold)
+    
+    roc_obj <- roc(cv_fold$obs, cv_fold$CH)
+    auc[[fold]] <- as.numeric(roc_obj$auc)
+}
+"
+"2","Setting levels: control = CH, case = MM
+"
+"2","Setting direction: controls > cases
+"
+"2","Setting levels: control = CH, case = MM
+"
+"2","Setting direction: controls > cases
+"
+"2","Setting levels: control = CH, case = MM
+"
+"2","Setting direction: controls > cases
+"
+"2","Setting levels: control = CH, case = MM
+"
+"2","Setting direction: controls > cases
+"
+"2","Setting levels: control = CH, case = MM
+"
+"2","Setting direction: controls > cases
+"
+"0","auc_df = data.frame(""Resample"" = names(auc),""AUC"" = unlist(auc))"
+"0","xgb_acc = mean(xgb_model$resample[,c(""Resample"", ""Accuracy"")]$Accuracy)"
+"0","xgb_rmse = mean(xgb_model$resample[,c(""Resample"", ""RMSE"")]$RMSE)"
+"0","xgb_auc = mean(auc_df$AUC)"
+"0","summary <- list()"
+"0","models <- c('dectree'  = dectree, 'rf' = rf_model, 'gbm' = best_gbm)"
+"0","summary_df <- sapply(models,get_scores) %>% as.data.frame()"
+"0","xgb_list <- list('xgboost' = c(xgb_rmse, xgb_auc,xgb_acc))"
+"0","summary_df <- cbind(summary_df,xgb_list)"

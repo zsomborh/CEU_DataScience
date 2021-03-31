@@ -1,0 +1,30 @@
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+
+N = 10000
+
+u0 = rpois(N, lambda = 0.1)
+u = rpois(N, lambda = 1)
+u2 = rpois(N, lambda = 2)
+u3 = rpois(N, lambda = 3)
+u4 = rpois(N, lambda = 4)
+
+
+
+df <- cbind(u0,u,u2,u3,u4) %>% as_data_frame()
+toplot <- melt(df)
+
+ggplot(toplot, aes(x = value, fill = variable)) + 
+    geom_bar()+
+    facet_wrap(~variable) + theme_bw()
+#    geom_bar(aes(x = u2), color = 'red')
+
+hist(rpois(N,lambda = 1.7))
+
+library(extraDistr)
+q <- rtpois(N, lambda = 1, a =-1, b = 7)
+?rtpois()
+hist(q)
+hist(u)
+# truncated poission distribution

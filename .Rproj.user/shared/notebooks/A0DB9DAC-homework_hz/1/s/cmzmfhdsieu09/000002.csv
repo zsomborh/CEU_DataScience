@@ -1,0 +1,36 @@
+"0","rf_grid <- readRDS('C:/Users/T450s/Desktop/programming/git/CEU_DataScience/rfgrid.rds')"
+"0","gbm_grid <- readRDS('C:/Users/T450s/Desktop/programming/git/CEU_DataScience/gbm_grid.rds')"
+"2","Loading required package: h2o
+"
+"2","
+----------------------------------------------------------------------
+
+Your next step is to start H2O:
+    > h2o.init()
+
+For H2O package documentation, ask for help:
+    > ??h2o
+
+After starting H2O, you can use the Web UI at http://localhost:54321
+For more information visit https://docs.h2o.ai
+
+----------------------------------------------------------------------
+
+"
+"2","
+Attaching package: ‘h2o’
+
+"
+"2","The following objects are masked from ‘package:stats’:
+
+    cor, sd, var
+
+"
+"2","The following objects are masked from ‘package:base’:
+
+    %*%, %in%, &&, ||, apply, as.factor, as.numeric, colnames, colnames<-, ifelse,
+    is.character, is.factor, is.numeric, log, log10, log1p, log2, round, signif, trunc
+
+"
+"0","xgb_model <- readRDS('C:/Users/T450s/Desktop/programming/git/CEU_DataScience/xgb_model.rds')"
+"0","dectree <- readRDS('C:/Users/T450s/Desktop/programming/git/CEU_DataScience/dectree.rds')"

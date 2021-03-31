@@ -1,0 +1,29 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1617050337209.000,
+    "dirty" : false,
+    "encoding" : "",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "B42EEB9C",
+    "lastKnownWriteTime" : 31525399262396527,
+    "last_content_update" : 1617050337209,
+    "path" : null,
+    "project_path" : null,
+    "properties" : {
+        "cacheKey" : "8E7A2CDB",
+        "caption" : "toplot",
+        "contentUrl" : "grid_resource/gridviewer.html?env=&obj=toplot&cache_key=8E7A2CDB",
+        "displayedObservations" : 3000,
+        "environment" : "",
+        "object" : "toplot",
+        "preview" : 0,
+        "totalObservations" : 3000,
+        "variables" : 2
+    },
+    "relative_order" : 2,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_dataframe"
+}
