@@ -1,0 +1,269 @@
+---
+title: "DataScience - homework2"
+author: "Zsombor Hegedus"
+date: '2021 április 3 '
+output: html_document
+---
+
+``` {r load_packages , include = FALSE}
+
+library(keras)
+library(tidyverse)
+library(data.table)
+library(raster)
+```
+
+## Introduction 
+
+This document is to showcase the solutions for the Data Science 2 course - 2nd homework. Further codes are available in this [github repo](https://github.com/zsomborh/CEU_DataScience/tree/main/Data_Science_2-homework_2) as well. 
+
+*Disclaimer: Please note that in this RMD file I didn't include every neural net experiment for the sake of easier knitting but all my codes for each hw, with experimenting with differeny layers+activation functions is available in my github [repo](https://github.com/zsomborh/CEU_DataScience/tree/main/Data_Science_2-homework_2).*
+
+## Classifying clothes 
+
+For this exercise I will use the “Fashion MNIST dataset” which contains are images of clothes to be classified. This is an inbulit dataset of `keras`, where each observation is an image in a 28x28 pixel grayscale format. I have 60k images as training and 10k testing sets, My task would be to build deep neural net models to predict image classes (e.g. whether given image is a sock, t-shirt, etc...). I will first display a few images, then I will introduce neural nets then convolutional neural nets in which I train based on only 500 observations which is validated on 500 more pictures from the original train dataset. At the end of this markdown I will run a validation on the test set as well, and use the better model to predict classes on the whole dataset.
+
+
+```{r read_minst, include = F, cache= T }
+
+fashion_mnist <- dataset_fashion_mnist()
+x_train <- fashion_mnist$train$x
+y_train <- fashion_mnist$train$y
+x_test <- fashion_mnist$test$x
+y_test <- fashion_mnist$test$y
+```
+
+
+## Looking at images
+
+After loading the data I tried taking a look at a few images. They are not of perfect quality but overall they can be identified. Let's try to take a look at a few examples in the below image (these images are labelled from 0 to 9 so overall there are 10 classes): 
+
+```{r, fig.width=10,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+# Checking first few clothes
+
+showCloth <- function(data, label) {
+
+    image(
+       flip(raster(data %>% unlist()),1),
+       col = gray.colors(255), xlab = label, ylab = ""
+   )
+}
+
+
+showFirst6Cloth <- function(data, label) {
+    par(mfrow = c(2, 4))
+    if (missing(label)) label <- rep("", 8)
+    walk(1:8, ~showCloth(data[.,,], label[.]))
+}
+
+showFirst6Cloth(x_train,y_train)
+
+
+```
+
+## Fully connected deep network
+
+After normalising the data (this means that a 28x28 pixel image is turned into a row in a table with 784 variable, each corresponding to a pixel). I experimented with 5 different nets (these are available in my [github repo]('https://github.com/zsomborh/CEU_DataScience/tree/main/Data_Science_2-homework_2/ homework_1.R)): 
+
+ - **Baseline model** with one hidden layer with 128 neurons and relu activation function, a dropout layer with 30% of observations dropped 
+ - A slightly modified version with lowered dropout rate (25%) + changing relu activation function to linear
+ - Adding an extra layer after dropout with hyperbolic tangent activation function and 30 neurons
+ - Changing the activatin function of the new layer to relu
+ - Adding more neurons to both the input layer, the extra hidden layer, and increasing dropout rate back to 30%
+ 
+Based on the above experiements my overall conclusions were that it is worth adding an extra layer to the baseline model, and to keep dropout rate at around 25% as that reached higher validation accuracy this way. The hyperbolic tangent, tanh beat the relu and so I continued with the third model in the end. 
+
+I trained a neural net with 3 dense layers (one input relu, an output softmax and a middle tanh layer) and a dropout layer, where I drop out 25% of all observations. Out of the 60k pictures, I will use 500 images for training and 500 different ones for validation and lastly predictions on a 1000 pictues from the test set are evaluated. The metric based on which weights are optimised is accuracy. The below image shows the training history over 50 epochs:
+
+``` {r, include = F, cache = T}
+
+x_train_modeling <- x_train[1:500,,]
+y_train_modeling <- y_train[1:500] %>% to_categorical(10)
+
+x_valid_modeling <- x_train[501:1000,,]
+y_valid_modeling <- y_train[501:1000] %>%  to_categorical(10)
+
+x_test_modeling <- x_test[1:1000,,]
+y_test_modeling <- y_test[1:1000] %>%  to_categorical(10)
+
+
+x_train_modeling <- rbindlist(
+    lapply(1:nrow(x_train_modeling),
+           function(y) {lapply(1:28, function(x) {
+               x_train_modeling[y,x,] 
+           }) %>% unlist %>% as.list
+    })
+) %>%  as.data.table()
+
+x_valid_modeling <- rbindlist(
+    lapply(1:nrow(x_valid_modeling),
+           function(y) {lapply(1:28, function(x) {
+               x_valid_modeling[y,x,] 
+           }) %>% unlist %>% as.list
+           })
+) %>% as.data.table()
+
+x_test_modeling <- rbindlist(
+    lapply(1:nrow(x_test_modeling),
+           function(y) {lapply(1:28, function(x) {
+               x_test_modeling[y,x,] 
+           }) %>% unlist %>% as.list
+           })
+) %>% as.data.table()
+
+colnames(x_train_modeling) <- paste0('pixel_', 1:784)
+colnames(x_valid_modeling) <- paste0('pixel_', 1:784)
+colnames(x_test_modeling) <- paste0('pixel_', 1:784)
+
+
+# do further transformations for x vars 
+
+x_train_modeling <- as.matrix(x_train_modeling) / 255
+x_valid_modeling <- as.matrix(x_valid_modeling) / 255
+x_test_modeling <- as.matrix(x_test_modeling) / 255
+
+```
+
+
+``` {r, include = FALSE, cache = TRUE}
+model <- keras_model_sequential()
+
+model %>%
+    layer_dense(units = 150, activation = 'relu', input_shape = c(784)) %>%
+    layer_dropout(rate = 0.25) %>% 
+    layer_dense(units = 30, activation = 'tanh') %>% 
+    layer_dense(units = 10, activation = 'softmax')
+
+model %>% compile(
+    optimizer = optimizer_rmsprop(), 
+    loss = 'categorical_crossentropy',
+    metrics = c('accuracy')
+)
+
+history <- model %>%  fit(
+    x_train_modeling, y_train_modeling,
+    epochs = 50, batch_size = 128,
+    validation_data = list(x_valid_modeling, y_valid_modeling)
+)
+
+pred <- model %>% evaluate(x_test_modeling, y_test_modeling)
+train_acc <- model %>%  evaluate(x_train_modeling, y_train_modeling)
+valid_acc <- model %>%  evaluate(x_valid_modeling, y_valid_modeling)
+
+
+keras_predictions_valid <- predict_classes(model, x_valid_modeling)
+
+
+plotConfusionMatrix <- function(label, prediction) {
+    bind_cols(label = label, predicted = prediction) %>%
+        group_by(label, predicted) %>%
+        summarize(N = n()) %>%
+        ggplot(aes(label, predicted)) +
+        geom_tile(aes(fill = N), colour = "white") +
+        scale_x_continuous(breaks = 0:9) +
+        scale_y_continuous(breaks = 0:9) +
+        geom_text(aes(label = N), vjust = 1, color = "white") +
+        scale_fill_viridis_c() +
+        theme_bw() + theme(legend.position = "none")
+}
+
+```
+
+```{r, fig.width=10,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+plot(history) + theme_bw()
+```
+
+From this plot we can see that the validation accuracy did not really change after 15 epoch, and was consistently at around 80%, while the training accuracy increased more and more over the epochs and started to overfit the data. When looking at the confusion matrix for all the classes below, we can see that indeed most observations were classified correctly,but the model does quite poorly when it comes to predicting class 6 (these are shirts that are mostly misscalssified as coats). 
+
+```{r, fig.width=10,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+plotConfusionMatrix(y_train[501:1000], keras_predictions_valid)
+```
+
+The below table will summarises the train, validation and test accuracies: 
+
+```{r , echo = FALSE , results = "asis", warning = FALSE, message = FALSE, cache  = TRUE }
+
+summary <- cbind(train_acc, valid_acc, pred)  %>% as.data.frame()
+colnames(summary) <- c('train', 'valid', 'test')
+ 
+knitr::kable(summary)
+```
+
+We can see that the model did quite similarly when it came to test accuracy compared to validation accuracy, while training accuracy is astronomically high. Both valid and test accuracy is around 79% probably due to low number of observations and overfitting the data on the train set. Let's see if this can be further enhanced by convolutional networks. 
+
+## Convolutional network
+
+Before training my model, I first needed to do further transformations and get my data back to 3 dimensional format. I first did 2D convolutional layer processing with a 3x3 kernel (bigger kernel is not very advised as images are small), letting my model to learn 32 filters and after that I use max pooling to reduce the spatial dimensions of the output volume. Once that is done I use a dropout layer with 25$ rate and will flatten the data to 1D and build the usual layers similarly to the previous section. 
+
+I experimented with multiple different setups in which after flattening I:
+ 
+ - **Baseline model** with one hidden layer with 16 neurons and a relu activation function
+ - increased neurons to 126 in that hidden layer and added another dropout layer with 10% rate
+ - increasd complexity even more by addnig 2 more dense layers and an extra dropout layer with 10% rate
+ - using the same network setup as introduced in the earlier chapter, and changing filters from 32 to 64.  
+ 
+Based on the above experiements my overall conclusions were that since each model performed very similarly and since none were able to achieve an accuracy that is over 82% on the test set, I decided to stick to a simpler model, that is the second one. 
+
+The below image shows the training history over 60 epochs:
+
+``` {r convolutional, include = FALSE, cache = TRUE}
+x_train_cnn <- array_reshape(x_train_modeling, c(nrow(x_train_modeling), 28, 28, 1))
+x_valid_cnn <- array_reshape(x_valid_modeling, c(nrow(x_valid_modeling), 28, 28, 1))
+x_test_cnn <- array_reshape(x_test_modeling, c(nrow(x_test_modeling), 28, 28, 1))
+
+cnn_model <- keras_model_sequential()
+cnn_model %>%
+    layer_conv_2d(
+        filters = 32,
+        kernel_size = c(3, 3),
+        activation = 'relu',
+        input_shape = c(28, 28, 1)
+    ) %>%
+    layer_max_pooling_2d(pool_size = c(2, 2)) %>%
+    layer_dropout(rate = 0.25) %>%
+    layer_flatten() %>%
+    layer_dense(units = 132, activation = 'relu') %>%
+    layer_dropout(rate = 0.1) %>%
+    layer_dense(units = 10, activation = 'softmax')
+
+compile(
+    cnn_model,
+    loss = 'categorical_crossentropy',
+    optimizer = optimizer_rmsprop(),
+    metrics = c('accuracy')
+)
+
+history2<- fit(
+    cnn_model, x_train_cnn, y_train_modeling,
+    epochs = 60, batch_size = 128,
+    validation_data = list(x_valid_cnn, y_valid_modeling)#,
+    #   callbacks = list(
+    #      callback_reduce_lr_on_plateau(monitor = 'val_loss', factor = 0.1)
+    #  )
+)
+
+pred_cnn <- cnn_model %>% evaluate(x_test_cnn, y_test_modeling)
+
+valid_acc2 <-cnn_model %>% evaluate(x_valid_cnn, y_valid_modeling) 
+train_acc2<- cnn_model %>% evaluate(x_train_cnn, y_train_modeling)
+```
+
+
+```{r, fig.width=10,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+plot(history2) + theme_bw()
+```
+
+From this plot we can see that the validation accuracy changed only slightly after 15 epoch, and finally reaching 82%, while the training accuracy increased more and more over the epochs and started to come to almost 100% accuracy. So overall it slightly overperformed the previous model.
+
+The below table will summarises the train, validation and test accuracies: 
+
+```{r , echo = FALSE , results = "asis", warning = FALSE, message = FALSE, cache  = TRUE }
+
+
+summary2 <- cbind(train_acc2, valid_acc2, pred_cnn)  %>% as.data.frame()
+colnames(summary2) <- c('train', 'valid', 'test')
+ 
+knitr::kable(summary2)
+```
+
+In the end the convolutional net improved on the test performance outperforming the deep network presented in the first section of this document. 
