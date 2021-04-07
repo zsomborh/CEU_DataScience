@@ -115,7 +115,6 @@ history <- model %>%  fit(
 )
 
 plot(history) + theme_bw()
-?theme
 
 # evaluate model 
 
@@ -377,3 +376,39 @@ fit(
 )
 
 pred_cnn3 <- cnn_model3 %>% evaluate(x_test_cnn, y_test_modeling)
+
+
+# Experiment 4
+cnn_model4 <- keras_model_sequential()
+cnn_model4 %>%
+    layer_conv_2d(
+        filters = 64,
+        kernel_size = c(3, 3),
+        activation = 'relu',
+        input_shape = c(28, 28, 1)
+    ) %>%
+    layer_max_pooling_2d(pool_size = c(2, 2)) %>%
+    layer_dropout(rate = 0.25) %>%
+    layer_flatten() %>%
+    layer_dense(units = 150, activation = 'relu') %>%
+    layer_dropout(rate = 0.25) %>%
+    layer_dense(units = 30, activation = 'tanh') %>% 
+    layer_dense(units = 10, activation = 'softmax')
+
+compile(
+    cnn_model4,
+    loss = 'categorical_crossentropy',
+    optimizer = optimizer_rmsprop(),
+    metrics = c('accuracy')
+)
+
+fit(
+    cnn_model4, x_train_cnn, y_train_modeling,
+    epochs = 60, batch_size = 128,
+    validation_data = list(x_valid_cnn, y_valid_modeling)#,
+    #   callbacks = list(
+    #      callback_reduce_lr_on_plateau(monitor = 'val_loss', factor = 0.1)
+    #  )
+)
+
+pred_cnn4 <- cnn_model4 %>% evaluate(x_test_cnn, y_test_modeling)

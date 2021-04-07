@@ -1,43 +1,28 @@
-rm(list = ls())
+---
+title: "homework2"
+author: "Zsombor Hegedus"
+date: '2021 április 6 '
+output: html_document
+---
 
+``` {r, include = F}
 library(keras)
 library(grid)
 library(magick)
+library(tidyverse)
 library(filesstrings)
 root_folder <- ('C:/Workspace/R_directory/CEU/machine-learning-course/data/hot-dog-not-hot-dog')
 
 
-# create valid folder
-#dir.create(paste0(root_folder,'/validation'))
-#dir.create(paste0(root_folder, '/validation/hot_dog'))
-#dir.create(paste0(root_folder, '/validation/not_hot_dog')) 
-
-# pick valid images randomly 
-
-#move_hotdog<- sample(list.files(paste0(root_folder,'/train/hot_dog')),50)
-#move_not_hotdog<- sample(list.files(paste0(root_folder,'/train/not_hot_dog')),50)
-
-# move files to validation folder
-#for (hotdog in move_hotdog){
-#    file.move(paste0(root_folder,'/train/hot_dog/',hotdog), paste0(root_folder,'/validation/hot_dog'))
-#}
-
-#for (not_hotdog in move_not_hotdog){
-#    file.move(paste0(root_folder,'/train/not_hot_dog/',not_hotdog), paste0(root_folder,'/validation/not_hot_dog'))
-#}
-
-# Check one image 
-
-example_image_path <- file.path("C:/Workspace/R_directory/CEU/machine-learning-course/data/hot-dog-not-hot-dog/train/hot_dog/2417.jpg")
-image_read(example_image_path)  # this is a PIL image
-img <- image_load(example_image_path, target_size = c(150, 150))
-
-x <- image_to_array(img) / 255
-grid::grid.raster(x)
-
-# Preprocess data
 
 
+```
+
+## Hotdog or not hotdog 
+
+In this section I am going to present my solution for an image classification task in which I will build a model to identify hotdogs. First of all I stripped out randomly 50 hotdog and non-hotdogs to use that as validation (an R script in my repo has the code that does this). After that I loaded up images in 150x150 size with keras's inbuilt data generator functions. 
+
+``` {r preprocess1, include = F}
 train_datagen <- image_data_generator(rescale = 1/255)  
 valid_datagen <- image_data_generator(rescale = 1/255)  
 test_datagen <- image_data_generator(rescale = 1/255) 
@@ -45,18 +30,6 @@ test_datagen <- image_data_generator(rescale = 1/255)
 
 image_size <- c(150, 150)
 batch_size <- 50
-
-
-train_datagen = image_data_generator(
-    rescale = 1/255,
-    rotation_range = 40,
-    width_shift_range = 0.2,
-    height_shift_range = 0.2,
-    shear_range = 0.2,
-    zoom_range = 0.2,
-    horizontal_flip = TRUE,
-    fill_mode = "nearest"
-)
 
 train_generator <- flow_images_from_directory(
     file.path(root_folder,'train'), # Target directory  
@@ -83,7 +56,13 @@ test_generator <- flow_images_from_directory(
     class_mode = "binary"
 )
 
+```
 
+### Baseline model
+
+I first I used a convolutional network very similar to what was available in the course repo. As seen below it has thee 2d convolutional layers with max pooling, then a dropout layer with flattener, and two dense layers in the end, where the last one - the output layer - is with sigmoid activation function. The output layer has only one node in the end, since all we care about is whether the image is a hotdog or not. 
+
+``` {r, include = F}
 hotdog_model <- keras_model_sequential() 
 
 hotdog_model %>% 
@@ -112,16 +91,28 @@ hotdog_model %>% compile(
     metrics = c("accuracy")
 )
 
-histroy <- hotdog_model %>% fit(
+history <- hotdog_model %>% fit(
     train_generator,
     steps_per_epoch = 398/batch_size,
     epochs = 5,
     validation_data = valid_generator,
-    validation_steps = 150/batch_size
+    validation_steps = 1
 )
 
-# Augmentation techniques: 
+hotdog_acc<-hotdog_model %>% evaluate(test_generator)
 
+```
+
+```{r, fig.width=10,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+
+plot(history) + theme_bw()
+```
+
+The history shows that validation accuracy will not be very high - it will be in the 60-70% accuracy range, but this is understandable as we are dealing with real images, and not preprocessed cleaned ones like in the case of fashion minst. I will further explore whether this accuracy can get higher with a few tweaks.
+
+I first experimented with image augmentation. For that I did a few preprocessing steps in the train generator functions - I shifted the images and zoomed in on them as well. The layers were the same as in the earlier example, so let's see how accuracy faired. 
+
+```{r ,include = F}
 train_datagen = image_data_generator(
     rescale = 1/255,
     rotation_range = 40,
@@ -141,8 +132,35 @@ train_generator <- flow_images_from_directory(
     class_mode = "binary"       # binary_crossentropy loss for binary labels
 )
 
+hotdog_aug_model <- keras_model_sequential() 
 
-history<- hotdog_model %>% fit(
+hotdog_aug_model %>% 
+    layer_conv_2d(filters = 32,
+                  kernel_size = c(3, 3), 
+                  activation = 'relu',
+                  input_shape = c(150, 150, 3)) %>%
+    layer_max_pooling_2d(pool_size = c(2, 2)) %>% 
+    layer_conv_2d(filters = 16,
+                  kernel_size = c(3, 3), 
+                  activation = 'relu') %>%
+    layer_max_pooling_2d(pool_size = c(2, 2)) %>% 
+    layer_conv_2d(filters = 16,
+                  kernel_size = c(3, 3), 
+                  activation = 'relu') %>%
+    layer_max_pooling_2d(pool_size = c(2, 2)) %>% 
+    layer_dropout(rate = 0.25) %>% 
+    layer_flatten() %>% 
+    layer_dense(units = 8, activation = 'relu') %>% 
+    layer_dense(units = 1, activation = "sigmoid")
+
+
+hotdog_aug_model %>% compile(
+    loss = "binary_crossentropy",
+    optimizer = 'rmsprop',
+    metrics = c("accuracy")
+)
+
+history2 <- hotdog_aug_model %>% fit(
     train_generator,
     steps_per_epoch = 398/batch_size,
     epochs = 5,
@@ -150,29 +168,19 @@ history<- hotdog_model %>% fit(
     validation_steps = 1
 )
 
+hotdog_aug_acc<- hotdog_aug_model %>% evaluate(test_generator)
+```
 
-plot(history)
-# let's use pretrained models - Inception V3 is suggested, but let's use mobilenet first
-# https://blogs.rstudio.com/ai/posts/2017-12-14-image-classification-on-small-datasets/
-# https://github.com/stratospark/food-101-keras
+```{r, fig.width=10,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
 
-model_imagenet <- application_mobilenet(weights = "imagenet")
+plot(history2) + theme_bw()
+```
 
-example_image_path <- file.path('C:/Workspace/R_directory/CEU/machine-learning-course/data/hot-dog-not-hot-dog/train/hot_dog/2417.jpg')
-img <- image_load(example_image_path, target_size = c(224, 224))  # 224: to conform with pre-trained network's inputs
-x <- image_to_array(img)
+There is a minor improvement in accuracy, so it is worth playing around with data augumentation for this task. 
 
-# ensure we have a 4d tensor with single element in the batch dimension,
-# the preprocess the input for prediction using mobilenet
-x <- array_reshape(x, c(1, dim(x)))
-x <- mobilenet_preprocess_input(x)
+Lastly I tried out tansfer learning - the idea of transfer learning is to use pre-trained models which have been fed with hundreds of thousands of images and use the knowedge gained by their learning to predict for my particular problem as well. I will use the ImageNet image database that is available for free and has processed a huge amount of data already. 
 
-# make predictions then decode and print them
-preds <- model_imagenet %>% predict(x)
-mobilenet_decode_predictions(preds, top = 3)[[1]]
-
-
-
+``` {r, include = F}
 train_datagen = image_data_generator(
     rescale = 1/255,
     rotation_range = 40,
@@ -239,14 +247,31 @@ model %>% compile(
     metrics = c("accuracy")
 )
 
-# train the model
-model %>% fit(
+
+history3<- model %>% fit(
     train_generator,
     steps_per_epoch = 398 / batch_size,
     epochs = 3,  # takes long time to train more
     validation_data = valid_generator,
-    validation_steps = 50
+    validation_steps = 1
 )
 
+transfer_acc<- model %>% evaluate(test_generator)
+```
 
-model %>% evaluate(test_generator)
+```{r, fig.width=10,fig.height=6, fig.align='center', echo = FALSE , results = "asis", warning = FALSE, message = FALSE}
+
+plot(history3) + theme_bw()
+```
+
+
+```{r , echo = FALSE , results = "asis", warning = FALSE, message = FALSE }
+
+
+summary3 <- cbind(hotdog_acc, hotdog_aug_acc, transfer_acc)  %>% as.data.frame()
+colnames(summary3) <- c('Baseline model', 'Baseline model + Augmentation', 'Imagenet Transfer learning model')
+ 
+knitr::kable(summary3)
+```
+
+All in all my models were not very accurate on the test set, but there was some tangible imrpovement coming from a few tweaks that I experimented with in this task. 
