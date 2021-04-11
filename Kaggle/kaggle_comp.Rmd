@@ -1,0 +1,329 @@
+---
+title: "DataScience2 - Kaggle competition"
+author: "Zsombor Hegedus"
+date: '2021 április 11 '
+output: html_document
+---
+
+``` {r, include = F}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, results = 'hide')
+```
+
+
+```{r load_everything}
+library(tidyverse)
+library(data.table)
+library(viridis)
+library(caret)
+library(data.table)
+library(xgboost)
+library(pROC)
+
+train_df <- fread('train.csv') %>% as.data.frame()
+teset_df <- fread('test.csv') %>% as.data.frame()
+train_df <- train_df %>% mutate(is_popular = as.factor(is_popular))
+
+theme_set(theme_bw())
+
+my_seed <- 20210411
+```
+## Introduction 
+
+This document is to showcase my solution for the Data Science 2 course - Kaggle competition. Further codes are available in this [github repo](https://github.com/zsomborh/CEU_DataScience/tree/main/Data_Science_2/Kaggle) as well. The task is to carry out a probability predicition on whether online news articles will be popular or not. I employed a set of different machine learning tools to predict the probabilities out of which the best model was XGBoost reaching an AUC that is close to 0.72.
+
+*Disclaimer: Please note that in this RMD file I didn't include every tunining step for the sake of easier knitting but all my codes with tuning parameters are available in my github [repo](https://github.com/zsomborh/CEU_DataScience/tree/main/Kaggle).*
+
+## Explanatory data analysis
+
+The task is a binary classification problem, in which I will predict whether an article is popular or not. These are articles published on Mashable, and they were collected in the span of two years. I received a training data with 27,752 observations and will predict the probability of given article to be popular on a test set with 11,892 observrvations. The features that I have for this task are the following (I grouped them somewhat arbitrarily): 
+
+
+- **tokens** - these are variables regarding tokens - e.g. how many tokens were used, how many unique tokens were there, number of stop words etc...
+- **channel** - dummies that state which channel given article was published in
+- **dow** - dumies telling which day the article was published on
+- **keywords ** - some descriptive statistics regarding key words
+- **references** - whether given article included images, videos, links - we can also see that the self references
+- **sentiment** - numeric variables that are tied to sentiment of the words used in the article
+- **LDA** - 5 Latent Dirichlet Allocation topics were identified, and the variables show whether given article belongs to any of these topics and by how much
+
+All these vars are numeric - some contain integers only, some are binary and there are continous variables as well. 
+
+```{r}
+tokens <- c('n_tokens_title', 'n_tokens_content', 'n_unique_tokens',
+           'average_token_length', 'n_non_stop_words', 'n_non_stop_unique_tokens'
+           )
+channel <- colnames(train_df)[substr(colnames(train_df),1,12) == 'data_channel']
+dow <- c(colnames(train_df)[substr(colnames(train_df),1,7) == 'weekday'], 'is_weekend')
+keywords <- c(colnames(train_df)[substr(colnames(train_df),1,2) == 'kw'], 'num_keywords')
+
+references <- c('num_hrefs','num_self_hrefs','num_imgs','num_videos',
+'self_reference_min_shares', 'self_reference_max_shares',
+'self_reference_avg_sharess')
+
+sentiment <- c(
+  'global_subjectivity','global_sentiment_polarity','global_rate_positive_words',
+  'global_rate_negative_words','rate_positive_words','rate_negative_words',
+  'avg_positive_polarity','min_positive_polarity','max_positive_polarity',
+  'avg_negative_polarity','min_negative_polarity','max_negative_polarity',
+  'title_subjectivity','title_sentiment_polarity','abs_title_subjectivity',
+  'abs_title_sentiment_polarity'
+  )
+```
+
+After looking through the distribution of all the above feature sets I noticed one potential data error - an extreme value that had a massive amount of unique tokens, so I removed that from my training set. The below will show a sample plot that I used for tokens vars - after the removal of the extreme value their distribution doesn't seem so skewed. 
+
+```{r}
+plot_hists <- function(df, vars) {
+    melted <- reshape2::melt(df[vars])
+    
+    p<- ggplot(melted, aes(x=value)) + 
+        geom_histogram()  + facet_wrap(~variable, scales = 'free') + labs(x='')
+    return(p)
+}
+
+train_df <- train_df %>% filter(!n_unique_tokens == max(n_unique_tokens))
+
+plot_hists(train_df, tokens)
+
+```
+
+Most of the distributions were skewed with a long right tail, I decided to do some feature engineering for 3 vars, as they resembled a lognormal distribution - below image is to show how their distribution looked after the transformation. 
+
+```{r}
+
+train_df <- train_df %>% mutate(
+    ln_num_hrefs = log(num_hrefs+1),
+    ln_num_self_hrefs = log(num_self_hrefs+1),
+    ln_num_imgs = log(num_imgs+1)
+    
+)
+
+plot_hists(train_df ,c('num_hrefs', 
+                       'num_self_hrefs', 
+                       'num_imgs', 
+                       'ln_num_hrefs', 
+                       'ln_num_self_hrefs', 
+                       'ln_num_imgs'))
+
+```
+
+I furthermore wanted to see if there is any tangible difference between cases with positive outcome and negative outcome for all observations - I decided to go with box pairplots to see if there is any noticable difference in certain categories (outliers are not visualised). In most cases, there were no noticable differences, but for reference vars, something interesting could have been seen:
+
+``` {r, fig.width = 10 ,fig.height = 8}
+
+plot_boxplots <- function(df, vars) {
+    
+    melted <- reshape2::melt(df[c(vars,'is_popular')],id = 'is_popular' )
+    
+    p <- ggplot(melted) + 
+        geom_boxplot(aes(x = is_popular, y = value, fill = is_popular), outlier.shape=NA) + 
+        facet_wrap(~variable, scales= 'free')
+
+    return(p)
+    
+}
+
+plot_boxplots(train_df, c(references ) ) 
+
+```
+
+The interquartile range for images is bigger for the number of images for the positive cases - looks like it makes sense to not overdo on the images. The number of self references on average is higher on the negative cases, so more diverse hrefs, and avoiding self references paid off in this sample. 
+
+## Modeling with caret
+
+I started modeling in `caret` and then I also utilised the capabilities of `h2o`. I first did some label encoding for `caret` to understand that this is a classification problem and decided to do modeling with the log transformed variables. When it came to features, I included everything that was available - even the `article_id` as it was causing singificant improvements in terms of AUC. I was reluctant to use it in the prediction first but then I thought that if the ID holds chronologycal information then it might be of merit for the prediction. For all models that I trained, I used 5-fold cross validation (for later submissions I used repeatedcv that helped greatly as without that I overfit the data too much to be able to find the best tuning parameters that will generalise to the test set) and in order to achieve the highest accuracy, I trained the whole training set and didn't set aside a validation set. Some preparation for `caret` is in the below code snippet: 
+
+```{r, cache = T}
+# Y is going to be the label
+Y <- 'is_popular'
+
+# X is the feature set for prediction
+X <- setdiff(colnames(train_df),c(Y,'num_hrefs', 'num_self_hrefs', 'num_imgs'))
+
+# encoding Y
+train_df <-
+train_df %>% mutate(
+    is_popular = factor(is_popular,levels = list(1,0), labels = c('yes','no'))
+) %>% as.data.frame()
+
+# formula for caret trained models
+formula <- as.formula(paste0(Y, '~',paste0(X,collapse = '+')))
+
+```
+
+I built a logistic elastic net, where I tried out multiple $\alpha$ and $\lambda$ values. Cross validation shown that the lower the $\lambda$ and higher the $\alpha$, the better the prediction. When $\alpha$ was one, that is when cross validated AUC was the highest - so that means that a Lasso type model is better than a Ridge type model, however the best AUC was achieved with a penalty term that is miniscule = 0.001, so this Lasso will not be very different to a simple logistic regression.
+
+```{r, cache = T}
+train_control <- trainControl(
+    method = "cv",
+    number = 5,
+    classProbs = TRUE, 
+    summaryFunction = twoClassSummary,
+    savePredictions = TRUE,
+    verboseIter = TRUE, 
+    allowParallel = TRUE
+)
+
+
+enet_grid <- expand.grid(
+    "alpha" = 1,
+    "lambda" = 0
+)
+
+set.seed(my_seed)
+enet_model <- train(formula,
+                   method = "glmnet",
+                   preprocess = c('center','scale'),
+                   data = train_df,
+                   tuneGrid = enet_grid,
+                   trControl = train_control)
+
+```
+
+After the elastic net I trained a random forest model, where cross validation showed that the best tuning parameter was achieved with an `mtry` of 2 and a `min.node.size` of 1. This means that I will use heavily overfitted and decorrelated trees. I also decided to tune the number of trees to 800 from the deafult 500. 
+
+```{r, cache = T}
+tune_grid <- expand.grid(
+    .mtry = c(2),
+    .splitrule = "gini",
+    .min.node.size = c(1)
+)
+
+
+set.seed(my_seed)
+rf_model <- train(
+    formula,
+    data = train_df,
+    method = "ranger",
+    trControl = train_control,
+    tuneGrid = tune_grid,
+    preProcess = c('center' , 'scale'),
+    importance = "impurity",
+    num.trees = 800
+)
+
+```
+
+
+Lastly I trained an XGBoost model in `caret`. There was a lot of approaches that I used for tuning, but what seemed to be working is 
+
+- number of boosted trees to be between 450 and 550 
+- max depth of trees was at 4 
+- learning rate of 0.02 to 0.03
+- minimum loss reduction to be between 0.01 and 0.02
+- variables to choose from between 40% to 50%
+- subsampling for each tree between 70-80%
+- and minimum_child weight to be 0, so no instance rate sum regularisation
+
+```{r, cache = T}
+xgb_grid <-  expand.grid(nrounds=c(450),
+                         max_depth = c(4),
+                         eta = c( 0.026),
+                         gamma = c(0.012),
+                         colsample_bytree = c(  0.42),
+                         subsample = c(0.75),
+                         min_child_weight = c(0))
+
+set.seed(my_seed)
+xgb_model <- train(
+    formula,
+    method = "xgbTree",
+    data = train_df,
+    tuneGrid = xgb_grid,
+    preProcess = c('center', 'scale'),
+    trControl = train_control
+)
+```
+
+Let's look at the AUC comparison between the models: 
+
+```{r, results = 'asis'}
+
+models <- c('Logistic elastic net', 'Random Forest', 'XGBoost')
+aucs <-  c(max(enet_model$results$ROC), rf_model$results$ROC,xgb_model$results$ROC)
+
+knitr::kable(data.frame('Models' = models, 'AUC' = aucs))
+
+```
+
+It is clear that XGBoost highly outperforms the elastic net and the random forest as well. I will try to beat the XGBoost with `h2o` in the next section 
+
+## Modeling with h2o
+
+First of all I created `h2o` data tables, and did a 80-20 percent train-validation split in the beginning.
+
+```{r prepare_h2o}
+
+train_df <- fread('train.csv')
+test_df <- fread('test.csv')
+train_df$is_popular<- factor(ifelse(train_df$is_popular == 1, 'yes', 'no'), levels = c('yes', 'no'))
+
+
+library(h2o)
+h2o.init()
+
+source('C:/Users/T450s/Desktop/programming/git/CEU_DataScience/Data_Science_2-homework_1/helper.R')
+
+data_split <- h2o.splitFrame(as.h2o(train_df), ratios = c(0.8), seed = my_seed)
+data_train <- data_split[[1]]
+data_valid<- data_split[[2]]
+
+
+y <- 'is_popular'
+X <- setdiff(colnames(data_train),c(y))
+
+```
+
+I first trained a random forest and a GBM model but I won't include them in this Rmarkdown (they can be found in my [github repo](https://github.com/zsomborh/CEU_DataScience/tree/main/Data_Science_2/Kaggle)), as I couldn't achieve any improvement in terms of AUC when compared to earlier models. Unfortunately I am running H2o on windows so I won't be able to train XGBoost models, but GBM models were not so bad either. I still use 5 fold cross validation, and used the following deep learning setup: 
+
+- I used 3 hidden layers, where first one has 128 neurons, second has 50 neurons and the last has 30 neurons, and a dropout layer with 10% dropout ratio
+- I will run them for 200 epochs, but it didn't really matter as AUC was far inferior to XGBoost
+- I added a few regularisation parameters for epsilon and max_w2
+
+``` {r}
+
+#deeplearning_model <- h2o.deeplearning(
+#    X, y,
+#    training_frame = data_train,
+#    model_id = "deeplearning",
+#    hidden = c(128,50,30),
+#    seed = my_seed,
+#    epochs = 200,
+#    epsilon  = 1e-10,
+#    max_w2 = 10,
+#    nfolds = 5,
+#    input_dropout_ratio = 0.1,
+#    keep_cross_validation_predictions = TRUE,
+#    stopping_metric = 'AUC'
+#)
+
+deeplearning_model <- h2o.loadModel("C:\\Users\\T450s\\Desktop\\programming\\git\\CEU_DataScience\\deeplearning")
+
+```
+
+But the main reason why I wanted to use h2o was to use automl and see if I can beat the XGBoost. I ran the automl so that it runs on 70 models, out of which the best one was a stacked model which used all models that were trained in the automl process. Other models were either deeplearning or GBM models. The below gives a sneak peak to the top 10 names on the leaderboard: 
+
+```{r, results = 'asis'}
+
+leaderboard <- readRDS('aml_leaderboard.rds')
+
+knitr::kable(leaderboard %>% head())
+
+```
+
+So even these 70 models were not that good when it came to AUC - probably if XGBoost models were stacked instead of GBMs it could have achieved a better AUC, but all in all it is not so bad either. It is now also apparent that it can't really beat the XGBoost model introduced in the `caret` section, and neither did it do better in the public leaderboard. So below table is to summarise the results. 
+
+```{r, results = 'asis'}
+deeplearning_auc <- h2o.auc(h2o.performance(deeplearning_model, newdata=data_valid))
+
+aml_auc <- leaderboard$auc %>% head(1)
+
+models <- c(models, 'Deeplearning', 'AutoML')
+aucs <-  c(aucs, deeplearning_auc,aml_auc)
+
+knitr::kable(data.frame('Models' = models, 'AUC' = aucs))
+```
+
+## Conclusions
+
+I set out to predict news popularity for articles that were written in a span of two years on Mashable. I experimented with a lot of machine learning models and was able to tune an XGBoost to be so performant that reached a cross validated AUC higher than 0.72. The XGBoost outperformed a logistic elastic net, random forest and an arbitrary deep learning model and `h2o`'s automl that was training 70 differnet models as well. My results were also quite good on the Kaggle competition, and 3 hours before it's closing I am in the 4th place in the public leaderbard. Can't wait to see what will be the final outcome.  
